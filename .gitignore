@@ -1,0 +1,84 @@
+# ==========================================
+# Dependencies
+# ==========================================
+node_modules/
+jspm_packages/
+web_modules/
+
+# ==========================================
+# Build and Compilation Outputs
+# ==========================================
+# Ignore the TypeScript compilation target folder (usually dist or build)
+dist/
+build/
+out/
+# Ignore JavaScript files directly generated from TypeScript if you compile inline
+# *.js
+# *.d.ts
+# *.js.map
+
+# TS build info cache
+*.tsbuildinfo
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# BUT do track the example file to show required variables
+!.env.example
+
+# ==========================================
+# Logs and Runtime Data
+# ==========================================
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pids
+*.pid
+*.seed
+*.pid.lock
+.node_repl_history
+
+# ==========================================
+# Testing & Coverage Output
+# ==========================================
+coverage/
+.nyc_output/
+
+# ==========================================
+# Linters, Formatters, & Tool Caches
+# ==========================================
+.eslintcache
+.stylelintcache
+.prettiercache
+.cache/
+.parcel-cache/
+
+# ==========================================
+# Package Manager Locks (Optional)
+# Un-comment if you prefer not to commit lockfiles
+# ==========================================
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# ==========================================
+# IDEs and System Files
+# ==========================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
