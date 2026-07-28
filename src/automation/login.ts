@@ -1,62 +1,104 @@
-import { Page } from "playwright";
+// src/automation/login.ts
+import { BrowserContext, Page } from "playwright";
 import { config } from "../config";
 import { solveCaptcha } from "./captcha";
+import { browserManager } from "../browser/browserManager";
+
+const MAX_CAPTCHA_ATTEMPTS = 3;
+const LOGGED_IN_SELECTOR = "a[href='/Inquiry/Inquiry/Logout_input.action']";
 
 /**
- * - No `ensure_logged_in` / "stay logged in" handling. That existed in the
- *   Selenium version because it reused ONE browser across many jobs and
- *   had to detect/recover an existing session. Here, every job gets a
- *   fresh context (browserManager.ts), so every job starts fully logged
- *   out — there is no prior session to detect or recover. Simpler by
- *   construction, not by omission.
- *
- * - Retries the whole login attempt (including a fresh captcha) up to
- *   MAX_ATTEMPTS times, because a wrong captcha guess is the single most
- *   likely failure mode here and it's recoverable by just trying again
- *   with a new captcha image — not something that should fail the entire
- *   job on attempt 1.
- *
- * - If Gemini can't solve it after MAX_ATTEMPTS,
- *   we throw — the job gets marked failed and alerted on, per the queue
- *   design, rather than hanging forever waiting for stdin nobody will type into.
- *
- * - Success is verified explicitly by checking the URL after submit,
- *   never assumed just because "the click didn't throw."
+ * Checks for a concrete DOM signal that can only exist when actually
+ * logged in — NOT just a URL comparison, since a popup, modal, or
+ * unexpected interstitial could leave you on the "right" URL without
+ * actually being in a usable logged-in state (or vice versa).
+ * Short timeout because we're not willing to wait long for something
+ * that should already be there if it's there at all.
  */
+async function isLoggedIn(page: Page): Promise<boolean> {
+    return page
+        .locator(LOGGED_IN_SELECTOR)
+        .waitFor({ state: "visible", timeout: 5_000 })
+        .then(() => true)
+        .catch(() => false);
+}
 
-const MAX_ATTEMPTS = 3;
+/**
+ * Public entry point. Two layers of retry, deliberately different in kind:
+ *
+ * - INNER (inside performLogin): retries a wrong captcha guess a few
+ *   times — the expected, routine failure mode, recoverable by just
+ *   trying again on the same page.
+ *
+ * - OUTER (here): if performLogin fails outright even after its inner
+ *   retries — meaning something structurally wrong happened, like a
+ *   stuck popup, unexpected navigation, or a crashed page state — we
+ *   don't keep hammering the same broken page. We recycle the ENTIRE
+ *   browser/context (fresh start, no leftover popup/modal state can
+ *   possibly survive that) and attempt the whole login flow one more
+ *   time. Only if that also fails do we give up and let the job fail —
+ *   which is correct: at that point something is either genuinely down
+ *   on Highmark's side, or credentials are wrong, and no amount of
+ *   retrying in-process will fix that. A human needs the alert.
+ */
+export async function ensureLoggedIn(): Promise<Page> {
+    try {
+        return await attemptEnsureLoggedIn();
+    } catch (err) {
+        console.warn("[login] First attempt failed structurally, recycling browser and retrying once:", err);
+        await browserManager.recycle();
+        return await attemptEnsureLoggedIn(); // if this throws too, it propagates to worker.ts as a real job failure
+    }
+}
 
-export async function login(page: Page): Promise<void> {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        console.log(`[login] Attempt ${attempt}/${MAX_ATTEMPTS}`);
+async function attemptEnsureLoggedIn(): Promise<Page> {
+    const context = await browserManager.getSessionContext();
+    const page = context.pages()[0] ?? (await context.newPage());
+
+    await page.goto(config.highmark.homePageUrl, { waitUntil: "domcontentloaded" });
+
+    if (await isLoggedIn(page)) {
+        console.log("[login] Existing session still valid");
+        return page;
+    }
+
+    console.log("[login] Not logged in — performing login");
+    await performLogin(page);
+
+    // Verify AFTER login too — don't just trust that submit succeeded
+    // because waitForURL resolved. Same signal, same reason: URL alone
+    // isn't proof.
+    if (!(await isLoggedIn(page))) {
+        throw new Error("[login] Login submitted but logged-in signal never appeared");
+    }
+
+    return page;
+}
+
+async function performLogin(page: Page): Promise<void> {
+    for (let attempt = 1; attempt <= MAX_CAPTCHA_ATTEMPTS; attempt++) {
+        console.log(`[login] Attempt ${attempt}/${MAX_CAPTCHA_ATTEMPTS}`);
 
         await page.goto(config.highmark.loginUrl, { waitUntil: "domcontentloaded" });
-
         await page.fill("#username", config.highmark.username);
         await page.fill("#password", config.highmark.password);
 
-        // Screenshot the captcha element directly into memory — no temp file,
         const captchaImage = await page.locator("#captchaId").screenshot();
         const captchaText = await solveCaptcha(captchaImage);
-
         await page.fill("#captchavalue", captchaText);
         await page.click("#loginButton");
 
-        // Give the page a moment to navigate, then check where we actually landed.
-        // waitForURL with a timeout means we don't hang indefinitely if the site
-        // is slow or the login silently did nothing.
-        const succeeded = await page
-            .waitForURL(config.highmark.homePageUrl, { timeout: 10_000 })
-            .then(() => true)
-            .catch(() => false);
-
-        if (succeeded) {
+        // Wait a beat for the page to settle, then let isLoggedIn (checked by
+        // the caller) be the real judge — this inner check just decides
+        // whether to retry the captcha or not.
+        await page.waitForTimeout(2_000);
+        if (await isLoggedIn(page)) {
             console.log("[login] Success");
             return;
         }
 
-        console.warn(`[login] Attempt ${attempt} failed (wrong captcha or slow login)`);
+        console.warn(`[login] Attempt ${attempt} failed`);
     }
 
-    throw new Error(`[login] Failed to log in after ${MAX_ATTEMPTS} attempts`);
+    throw new Error(`[login] Failed after ${MAX_CAPTCHA_ATTEMPTS} captcha attempts`);
 }

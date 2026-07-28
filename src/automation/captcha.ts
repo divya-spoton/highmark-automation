@@ -46,9 +46,18 @@ export async function solveCaptcha(imageBuffer: Buffer): Promise<string> {
                     parts: [
                         { text: CAPTCHA_PROMPT },
                         { inline_data: { mime_type: "image/png", data: base64Image } },
-                    ],
+                    ]
                 },
             ],
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "object",
+                    properties: { captchaText: { type: "string" } },
+                    required: ["captchaText"],
+                },
+                temperature: 0, // deterministic reading of a fixed image, not creative generation
+            },
         }),
     });
 
@@ -58,18 +67,18 @@ export async function solveCaptcha(imageBuffer: Buffer): Promise<string> {
     }
 
     const data = await response.json();
-    const rawText: string | undefined =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) throw new Error("[captcha] Gemini response had no content");
 
-    if (!rawText) {
-        throw new Error("[captcha] Gemini response had no text content");
+    let candidate: string;
+    try {
+        candidate = JSON.parse(rawText).captchaText?.trim();
+    } catch {
+        throw new Error(`[captcha] Gemini response wasn't valid JSON: "${rawText}"`);
     }
 
-    const candidate = rawText.trim();
-
-    if (!PLAUSIBLE_CAPTCHA.test(candidate)) {
+    if (!candidate || !PLAUSIBLE_CAPTCHA.test(candidate)) {
         throw new Error(`[captcha] Gemini returned an implausible captcha value: "${candidate}"`);
     }
-
     return candidate;
 }
