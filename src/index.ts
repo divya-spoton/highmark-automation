@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { initializeApp, cert } from "firebase-admin/app";
 import { readFileSync } from "fs";
 import { config } from "./config";

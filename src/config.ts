@@ -28,4 +28,5 @@ export const config = {
     firebase: {
         serviceAccountPath: requireEnv("FIREBASE_SERVICE_ACCOUNT_PATH"),
     },
+    dryRun: requireEnv("DRY_RUN") === "true",
 };

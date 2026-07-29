@@ -97,7 +97,12 @@ export async function fillAndSubmitInquiryForm(page: Page, data: HighmarkFormDat
     await page.fill("#addr1Line1", addressLine1);
     await page.fill("#addr1Pin", addressPinCode);
 
-    // await page.click("#btnSubNewInquiry1");
+    if (config.dryRun) {
+        console.log("[inquiryForm] DRY_RUN active — form filled but NOT submitted");
+        return;
+    }
+
+    await page.click("#btnSubNewInquiry1");
 
     // Confirm submission actually succeeded — don't assume a click that
     // didn't throw means the form was accepted. Adjust the selector below

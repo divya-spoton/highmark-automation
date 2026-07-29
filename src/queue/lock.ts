@@ -14,7 +14,6 @@ import { getFirestore, Timestamp, FieldValue } from "firebase-admin/firestore";
  */
 
 const COLLECTION = "credit_scores";
-const STALE_AFTER_MS = 20 * 60 * 1000; // 20 min — generous vs. a real run (~5-10 min)
 
 export interface ClaimedJob {
     docId: string;

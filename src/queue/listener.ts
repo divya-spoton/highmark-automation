@@ -4,20 +4,7 @@ import { claimNextJob, ClaimedJob } from "./lock";
 const COLLECTION = "credit_scores";
 
 /**
- * Starts the queue watcher. Two mechanisms, deliberately different in kind:
- *
- * - onSnapshot: reacts near-instantly when a new "queued" doc appears.
- *   This is the primary way jobs get noticed. The Admin SDK manages the
- *   underlying connection/reconnect itself — we don't hand-roll that.
- *
- * - setInterval: NOT for detecting new jobs (the snapshot listener
- *   already does that) — it exists purely to call recoverStaleJobs(),
- *   which is inherently time-based ("has this been 'processing' too
- *   long?") and can't be expressed as "react when a document changes."
- *   It doubles as a safety net: if the snapshot listener ever misses
- *   something, a queued job sitting untouched still eventually gets
- *   picked up because attemptClaim() below runs on every stale-check
- *   tick too, not just on snapshot events.
+ * Starts the queue watcher.
  *
  * onJobAvailable is a callback into worker.ts — this file only detects
  * and claims; it doesn't know how to actually run a Highmark job.
