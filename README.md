@@ -1,0 +1,3 @@
+creditType value — HMFunctions.py uses IDENTIFIER_FIELD_MAP/CREDIT_TYPE from env vars whose actual values weren't in anything I've seen; you'll need to inspect the live <select id="creditType">'s option values and confirm.
+IDENTIFIER_FIELD_MAP — I guessed panNo/ckycNo as field IDs since the reference code's map wasn't shown to me (only referenced via env var). Check the actual form's field IDs for PAN vs. CKYC input.
+Post-submit success signal — the reference code has the actual submit click commented out, which makes me think whoever wrote it hadn't yet confirmed what a successful submission looks like. Worth deciding together what real confirmation looks like (a banner? redirect? nothing visible until the status page?) before trusting waitForTimeout(2_000) as "done."

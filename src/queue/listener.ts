@@ -1,9 +1,7 @@
-// src/queue/listener.ts
 import { getFirestore } from "firebase-admin/firestore";
-import { claimNextJob, recoverStaleJobs, ClaimedJob } from "./lock";
+import { claimNextJob, ClaimedJob } from "./lock";
 
 const COLLECTION = "credit_scores";
-const STALE_CHECK_INTERVAL_MS = 60_000; // 1 min — cheap safety net, not the primary trigger
 
 /**
  * Starts the queue watcher. Two mechanisms, deliberately different in kind:
@@ -54,27 +52,9 @@ export function startQueueWatcher(
         .collection(COLLECTION)
         .where("status", "==", "queued")
         .onSnapshot(
-            (snapshot) => {
-                if (!snapshot.empty) {
-                    attemptClaim();
-                }
-            },
-            (err) => {
-                // Listener itself errored (rare, but possible — e.g. permissions
-                // issue). Log loudly; the interval below still catches queued
-                // jobs even if this listener is dead.
-                console.error("[listener] onSnapshot error:", err);
-            }
+            (snapshot) => { if (!snapshot.empty) attemptClaim(); },
+            (err) => console.error("[listener] onSnapshot error:", err)
         );
 
-    const staleCheckInterval = setInterval(async () => {
-        await recoverStaleJobs();
-        await attemptClaim(); // safety net, see note above
-    }, STALE_CHECK_INTERVAL_MS);
-
-    // Returns a cleanup function for graceful shutdown (SIGTERM handling in index.ts)
-    return () => {
-        unsubscribeSnapshot();
-        clearInterval(staleCheckInterval);
-    };
+    return () => unsubscribeSnapshot();
 }

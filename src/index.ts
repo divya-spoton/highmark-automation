@@ -1,11 +1,31 @@
-import { chromium } from "playwright";
+import { initializeApp, cert } from "firebase-admin/app";
+import { readFileSync } from "fs";
+import { config } from "./config";
+import { recoverOrphanedJobsOnStartup } from "./queue/lock";
+import { startQueueWatcher } from "./queue/listener";
+import { runJob } from "./worker";
+import { browserManager } from "./browser/browserManager";
+
+initializeApp({
+    credential: cert(JSON.parse(readFileSync(config.firebase.serviceAccountPath, "utf-8"))),
+});
 
 async function main() {
-    const browser = await chromium.launch({ headless: false }); // headed, so you SEE it
-    const page = await browser.newPage();
-    await page.goto("https://example.com");
-    console.log(await page.title());
-    await browser.close();
+    console.log("[index] Starting Highmark automation worker...");
+
+    await recoverOrphanedJobsOnStartup();
+
+    const workerId = `worker-${process.pid}-${Date.now()}`;
+    const stopWatching = startQueueWatcher(workerId, runJob);
+
+    const shutdown = async () => {
+        console.log("[index] Shutting down...");
+        stopWatching();
+        await browserManager.shutdown();
+        process.exit(0);
+    };
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
 }
 
 main();

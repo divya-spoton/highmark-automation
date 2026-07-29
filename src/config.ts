@@ -19,8 +19,13 @@ export const config = {
         password: requireEnv("HIGHMARK_PASSWORD"),
         loginUrl: "https://hub.crifhighmark.com/Inquiry/Inquiry/login.action",
         homePageUrl: "https://hub.crifhighmark.com/Inquiry/Inquiry/portalHome.action",
+        creditType: process.env.HIGHMARK_CREDIT_TYPE ?? "CIR", // confirm actual value against the live <select> options
+        creditAmount: Number(process.env.HIGHMARK_CREDIT_AMOUNT ?? 500000),
     },
     gemini: {
         apiKey: requireEnv("GEMINI_API_KEY"),
+    },
+    firebase: {
+        serviceAccountPath: requireEnv("FIREBASE_SERVICE_ACCOUNT_PATH"),
     },
 };
