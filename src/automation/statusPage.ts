@@ -1,4 +1,5 @@
 import { Page } from "playwright";
+import { dismissStayLoggedInPopup } from "./login";
 
 /**
  * After a successful inquiry submission, Highmark takes some time to
@@ -44,6 +45,7 @@ export async function pollAndDownloadReport(page: Page): Promise<Buffer> {
         // Re-navigate/refresh each attempt — the status page likely needs a
         // reload to show a newly-ready report, it won't update live on its own.
         await page.reload({ waitUntil: "domcontentloaded" });
+        await dismissStayLoggedInPopup(page);
 
         const pdfLink = page.locator("(//img[@alt='PDF Report']/parent::a)[1]");
         const isReady = await pdfLink

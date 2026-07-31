@@ -20,13 +20,14 @@ export function startQueueWatcher(
     // correctness even without this, but it avoids
     // wasted reads from firing two claims at once)
 
-    async function attemptClaim() {
+    async function drainQueue() {
         if (isProcessing) return;
         isProcessing = true;
         try {
-            const job = await claimNextJob(workerId);
-            if (job) {
+            let job = await claimNextJob(workerId);
+            while (job) {
                 await onJobAvailable(job);
+                job = await claimNextJob(workerId); // check again immediately — don't wait for a snapshot
             }
         } catch (err) {
             console.error("[listener] Error during claim/job execution:", err);
@@ -39,7 +40,7 @@ export function startQueueWatcher(
         .collection(COLLECTION)
         .where("status", "==", "queued")
         .onSnapshot(
-            (snapshot) => { if (!snapshot.empty) attemptClaim(); },
+            (snapshot) => { if (!snapshot.empty) drainQueue(); },
             (err) => console.error("[listener] onSnapshot error:", err)
         );
 

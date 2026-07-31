@@ -20,7 +20,8 @@ export interface ClaimedJob {
     data: FirebaseFirestore.DocumentData;
 }
 
-export async function claimNextJob(workerId: string): Promise<ClaimedJob | null> {
+export async function 
+claimNextJob(workerId: string): Promise<ClaimedJob | null> {
     const db = getFirestore();
 
     return db.runTransaction(async (tx) => {

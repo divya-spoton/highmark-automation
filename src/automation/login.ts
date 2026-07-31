@@ -6,6 +6,25 @@ import { browserManager } from "../browser/browserManager";
 
 const MAX_CAPTCHA_ATTEMPTS = 3;
 const LOGGED_IN_SELECTOR = "a[href='/Inquiry/Inquiry/Logout_input.action']";
+const STAY_LOGGED_IN_SELECTOR = ".stayLogged_button";
+
+/**
+ * after some minutes logged in, Highmark shows a "session expiring, stay
+ * logged in?" popup on whatever page you're currently on. If ignored, it
+ * auto-logs-out to Logout_input.action. This must be checked BEFORE the
+ * logout-link check below — a popup sitting on top of the page is a
+ * DIFFERENT state from either "logged in cleanly" or "logged out," and
+ * needs handling on its own rather than being conflated with either.
+ */
+export async function dismissStayLoggedInPopup(page: Page): Promise<void> {
+    const stayLoggedButton = page.locator(STAY_LOGGED_IN_SELECTOR);
+    const isVisible = await stayLoggedButton.isVisible().catch(() => false);
+    if (isVisible) {
+        console.log("[login] Session-expiry popup detected — clicking 'stay logged in'");
+        await stayLoggedButton.click();
+        await page.waitForTimeout(2_000); // give the page a moment to process continueSession() and settle
+    }
+}
 
 /**
  * Checks for a concrete DOM signal that can only exist when actually
@@ -16,6 +35,7 @@ const LOGGED_IN_SELECTOR = "a[href='/Inquiry/Inquiry/Logout_input.action']";
  * that should already be there if it's there at all.
  */
 async function isLoggedIn(page: Page): Promise<boolean> {
+    await dismissStayLoggedInPopup(page);
     return page
         .locator(LOGGED_IN_SELECTOR)
         .waitFor({ state: "visible", timeout: 5_000 })

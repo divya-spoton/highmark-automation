@@ -39,11 +39,7 @@ export async function runJob(job: ClaimedJob): Promise<void> {
     console.log(`[worker] Starting job ${docId}`);
 
     try {
-        const loanApplicationUid: string | undefined = data.loanApplicationUid;
-        if (!loanApplicationUid) {
-            throw new Error("[worker] Job doc missing loanApplicationUid — cannot write results anywhere");
-        }
-
+       // docId IS the Firebase UID / loan_applications doc ID — no separate
         const formData = buildFormData(data);
 
         const page = await ensureLoggedIn();
@@ -54,7 +50,7 @@ export async function runJob(job: ClaimedJob): Promise<void> {
         const storagePath = await uploadHighmarkPdf(docId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
 
-        await writeHighmarkResult(loanApplicationUid, storagePath, parsed);
+        await writeHighmarkResult(docId, storagePath, parsed);
 
         await markComplete(docId);
         console.log(`[worker] Job ${docId} complete`);

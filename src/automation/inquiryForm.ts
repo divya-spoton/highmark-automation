@@ -112,7 +112,7 @@ export async function fillAndSubmitInquiryForm(page: Page, data: HighmarkFormDat
 }
 
 /**
- * Navigates via the nav menu, same approach as HMFunctions.py's
+ * Navigates via the nav menu
  * navigate_hm — clicks the "CIR PRO V2" link inside the consumer bureau
  * nav section rather than assuming a direct URL exists.
  */
