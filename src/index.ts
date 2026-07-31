@@ -9,6 +9,7 @@ import { browserManager } from "./browser/browserManager";
 
 initializeApp({
     credential: cert(JSON.parse(readFileSync(config.firebase.serviceAccountPath, "utf-8"))),
+    storageBucket: "validator-ca4c7.firebasestorage.app"
 });
 
 async function main() {
