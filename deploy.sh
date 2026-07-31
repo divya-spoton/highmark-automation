@@ -4,7 +4,7 @@
 # container. Plain docker build/run — no docker-compose involved.
 #
 # First-time setup (once): clone the repo via the deploy key, then manually
-# scp .env and serviceAccount.json into this directory — this script does
+# scp .env and spoton-housing.json into this directory — this script does
 # NOT touch those, on purpose, since they're not in git.
 #
 # Usage:
@@ -23,8 +23,8 @@ if [ ! -f .env ]; then
     echo "ERROR: .env not found. This must be scp'd in manually, it's not in git."
     exit 1
 fi
-if [ ! -f serviceAccount.json ]; then
-    echo "ERROR: serviceAccount.json not found. This must be scp'd in manually, it's not in git."
+if [ ! -f spoton-housing.json ]; then
+    echo "ERROR: spoton-housing.json not found. This must be scp'd in manually, it's not in git."
     exit 1
 fi
 
@@ -43,7 +43,7 @@ docker run -d \
     --name "$CONTAINER_NAME" \
     --restart unless-stopped \
     --env-file .env \
-    -v "$(pwd)/serviceAccount.json:/app/serviceAccount.json:ro" \
+    -v "$(pwd)/spoton-housing.json:/app/spoton-housing.json:ro" \
     --memory="512m" \
     "$IMAGE_NAME"
 
