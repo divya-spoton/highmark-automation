@@ -13,12 +13,6 @@ import { writeHighmarkResult } from "./firestoreWriteback";
  * principle already applied to inquiryForm.ts — so that if the
  * credit_scores doc's shape changes later, this is the ONE place that
  * needs updating, not scattered across the form-fill logic itself.
- *
- * ASSUMPTION FLAGGED: this assumes the queued doc has a `loanApplicationUid`
- * field pointing at the corresponding loan_applications doc, plus the
- * form fields directly on it. I haven't seen how credit_scores docs get
- * created in the new flow (the reference Python keyed by identifierValue,
- * not uid) — confirm this mapping is actually correct before relying on it.
  */
 function buildFormData(jobData: FirebaseFirestore.DocumentData): HighmarkFormData {
     return {
@@ -39,7 +33,11 @@ export async function runJob(job: ClaimedJob): Promise<void> {
     console.log(`[worker] Starting job ${docId}`);
 
     try {
-       // docId IS the Firebase UID / loan_applications doc ID — no separate
+        // docId IS the phone number of application
+        // UID is userId
+
+        const uid = data.userId;
+
         const formData = buildFormData(data);
 
         const page = await ensureLoggedIn();
@@ -50,7 +48,7 @@ export async function runJob(job: ClaimedJob): Promise<void> {
         const storagePath = await uploadHighmarkPdf(docId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
 
-        await writeHighmarkResult(docId, storagePath, parsed);
+        await writeHighmarkResult(docId, uid, storagePath, parsed);
 
         await markComplete(docId);
         console.log(`[worker] Job ${docId} complete`);

@@ -33,7 +33,7 @@ export class BrowserManager {
 
         console.log("[browserManager] Launching Chromium + session context...");
         this.browser = await chromium.launch({
-            headless: config.dryRun ? false : true,
+            headless: true,
             args: ["--no-sandbox", "--disable-dev-shm-usage"],
         });
         this.browser.on("disconnected", () => {

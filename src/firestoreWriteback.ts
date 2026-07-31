@@ -6,6 +6,7 @@ import { HighmarkExtractedData } from "./parsing/highmarkParser";
  * this is raw source data, written as a sibling field, never overwriting anything.
  */
 export async function writeHighmarkResult(
+    phone: string,
     loanApplicationUid: string,
     storagePath: string,
     parsed: HighmarkExtractedData
@@ -13,11 +14,14 @@ export async function writeHighmarkResult(
     await getFirestore().collection("loan_applications").doc(loanApplicationUid).set(
         {
             highmark_data: {
-                score: parsed.score,
-                user_details: parsed.user_details,
-                attributes: parsed.attributes,
-                storagePath,
-                fetched_at: FieldValue.serverTimestamp(),
+                // keyed by phone number
+                [phone]: {
+                    score: parsed.score,
+                    user_details: parsed.user_details,
+                    attributes: parsed.attributes,
+                    storagePath,
+                    fetched_at: FieldValue.serverTimestamp(),
+                },
             },
         },
         { merge: true }
