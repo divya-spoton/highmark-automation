@@ -35,7 +35,7 @@ import { config } from "../config";
 export interface HighmarkFormData {
     firstName: string;
     lastName: string;
-    dob: string; // DD/MM/YYYY, matching Parsers.py's getCkycData output
+    dob: string; // DD/MM/YYYY
     fatherName: string;
     identifierType: "pan" | "ckyc";
     identifierValue: string;
@@ -45,8 +45,8 @@ export interface HighmarkFormData {
 }
 
 const IDENTIFIER_FIELD_MAP: Record<string, string> = {
-    pan: "panNo",       // confirm exact field ID against the live form
-    ckyc: "ckycNo",     // confirm exact field ID against the live form
+    pan: "pan",
+    ckyc: "ckyc",     // confirm exact field ID against the live form
 };
 
 function requireField(data: HighmarkFormData, field: keyof HighmarkFormData): string {
@@ -120,6 +120,14 @@ async function navigateToSingleRequest(page: Page): Promise<void> {
     const consumerBureau = page.locator(".consumerbureau");
     await consumerBureau.waitFor({ state: "visible", timeout: 10_000 });
 
-    const link = consumerBureau.locator("a", { hasText: "CIR PRO V2" });
-    await link.click();
+    // Step 1: hover Consumer Bureau to reveal "Single Request" / "Track Request"
+    await consumerBureau.hover();
+
+    // Step 2: hover "Single Request" (exact match, to avoid matching "Single Request Status")
+    const singleRequest = consumerBureau.locator("a", { hasText: /^Single Request$/ });
+    await singleRequest.hover();
+
+    // Step 3: CIR PRO V2 should now be visible → click it
+    const cirProV2 = consumerBureau.locator("a", { hasText: "CIR PRO V2" });
+    await cirProV2.click();
 }

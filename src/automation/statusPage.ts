@@ -72,6 +72,14 @@ async function navigateToStatusPage(page: Page): Promise<void> {
     const consumerBureau = page.locator(".consumerbureau");
     await consumerBureau.waitFor({ state: "visible", timeout: 10_000 });
 
+    // Step 1: hover Consumer Bureau to reveal "Single Request" / "Track Request"
+    await consumerBureau.hover();
+
+    // Step 2: find and hover "Track Request" to reveal the Single Request Status submenu
+    const trackRequest = consumerBureau.locator("a", { hasText: "Track Request" });
+    await trackRequest.hover();
+
+    // Step 3: find and click "Single Request Status" submenu
     const link = consumerBureau.locator("a", { hasText: "Single Request Status" });
     await link.click();
 }

@@ -1,5 +1,6 @@
 // src/browser/browserManager.ts
 import { chromium, Browser, BrowserContext } from "playwright";
+import { config } from "../config";
 
 const RESTART_AFTER_N_JOBS = 25;
 
@@ -32,7 +33,7 @@ export class BrowserManager {
 
         console.log("[browserManager] Launching Chromium + session context...");
         this.browser = await chromium.launch({
-            headless: true,
+            headless: config.dryRun ? false : true,
             args: ["--no-sandbox", "--disable-dev-shm-usage"],
         });
         this.browser.on("disconnected", () => {
