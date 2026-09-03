@@ -29,34 +29,46 @@ function buildFormData(jobData: FirebaseFirestore.DocumentData): HighmarkFormDat
 }
 
 export async function runJob(job: ClaimedJob): Promise<void> {
-    const { docId, data } = job;
-    console.log(`[worker] Starting job ${docId}`);
+    // job.docId is the credit_scores document ID — the phone (10-digit) or
+    // PAN this check was queued under. It is NOT necessarily a loan
+    // application ID (see standalone below).
+    const { docId: creditScoreDocId, data } = job;
+    console.log(`[worker] Starting job ${creditScoreDocId}`);
 
     try {
-        // docId IS the phone number of application
-        // UID is userId
-
-        const uid = data.userId;
+        // data.loanApplicationId: for a REAL application check, this is the
+        // loan_applications doc to write highmark_data onto. For a
+        // STANDALONE/manual check (no real application), the dashboard sets
+        // this to the same value as creditScoreDocId, since there's nothing
+        // real to point at.
+        // Fallback to the old `userId` field name for any job doc still
+        // sitting in "queued" status from before this rename shipped.
+        const loanApplicationId: string = data.loanApplicationId ?? data.userId;
+        const standalone = !!data.standalone;
 
         const formData = buildFormData(data);
 
-        const page = await ensureLoggedIn();
+         const page = await ensureLoggedIn();
         await fillAndSubmitInquiryForm(page, formData);
 
         const pdfBuffer = await pollAndDownloadReport(page);
 
-        const storagePath = await uploadHighmarkPdf(docId, pdfBuffer);
+        const storagePath = await uploadHighmarkPdf(creditScoreDocId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
 
-        await writeHighmarkResult(docId, uid, storagePath, parsed, !!data.standalone);
+        await writeHighmarkResult({
+            creditScoreDocId,
+            loanApplicationId,
+            storagePath,
+            parsed,
+            standalone,
+        });
 
-        await markComplete(docId);
-        console.log(`[worker] Job ${docId} complete`);
+        await markComplete(creditScoreDocId);
+        console.log(`[worker] Job ${creditScoreDocId} complete`);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`[worker] Job ${docId} failed:`, message);
-        await markFailed(docId, message);
-        // Not re-thrown — one bad job must not take the whole worker process
-        // down; it needs to stay alive for the next job in the queue.
+        console.error(`[worker] Job ${creditScoreDocId} failed:`, message);
+        await markFailed(creditScoreDocId, message);
     }
 }
