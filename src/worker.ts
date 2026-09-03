@@ -48,7 +48,7 @@ export async function runJob(job: ClaimedJob): Promise<void> {
         const storagePath = await uploadHighmarkPdf(docId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
 
-        await writeHighmarkResult(docId, uid, storagePath, parsed);
+        await writeHighmarkResult(docId, uid, storagePath, parsed, !!data.standalone);
 
         await markComplete(docId);
         console.log(`[worker] Job ${docId} complete`);

@@ -22,8 +22,8 @@ export const config = {
         creditType: process.env.HIGHMARK_CREDIT_TYPE ?? "A06",
         creditAmount: Number(process.env.HIGHMARK_CREDIT_AMOUNT ?? 500000.0),
     },
-    gemini: {
-        apiKey: requireEnv("GEMINI_API_KEY"),
+   openai: {
+        apiKey: requireEnv("OPENAI_API_KEY"),
     },
     firebase: {
         serviceAccountPath: requireEnv("FIREBASE_SERVICE_ACCOUNT_PATH"),

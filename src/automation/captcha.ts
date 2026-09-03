@@ -22,8 +22,11 @@ import { config } from "../config";
  *   attempt on garbage.
  */
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+const OPENAI_MODEL = "gpt-4o-mini";
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
 const CAPTCHA_PROMPT =
     "This image contains a distorted text captcha (letters and/or digits). " +
@@ -37,48 +40,61 @@ const PLAUSIBLE_CAPTCHA = /^[A-Za-z0-9]{4,8}$/;
 export async function solveCaptcha(imageBuffer: Buffer): Promise<string> {
     const base64Image = imageBuffer.toString("base64");
 
-    const response = await fetch(`${GEMINI_URL}?key=${config.gemini.apiKey}`, {
+    const response = await fetch(OPENAI_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.openai.apiKey}`,
+        },
         body: JSON.stringify({
-            contents: [
+            model: OPENAI_MODEL,
+            temperature: 0, // deterministic reading of a fixed image, not creative generation
+            messages: [
                 {
-                    parts: [
-                        { text: CAPTCHA_PROMPT },
-                        { inline_data: { mime_type: "image/png", data: base64Image } },
-                    ]
+                    role: "user",
+                    content: [
+                        { type: "text", text: CAPTCHA_PROMPT },
+                        {
+                            type: "image_url",
+                            image_url: { url: `data:image/png;base64,${base64Image}` },
+                        },
+                    ],
                 },
             ],
-            generationConfig: {
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: "object",
-                    properties: { captchaText: { type: "string" } },
-                    required: ["captchaText"],
+            response_format: {
+                type: "json_schema",
+                json_schema: {
+                    name: "captcha_response",
+                    strict: true,
+                    schema: {
+                        type: "object",
+                        properties: { captchaText: { type: "string" } },
+                        required: ["captchaText"],
+                        additionalProperties: false,
+                    },
                 },
-                temperature: 0, // deterministic reading of a fixed image, not creative generation
             },
         }),
     });
 
     if (!response.ok) {
         const errorBody = await response.text().catch(() => "<unreadable body>");
-        throw new Error(`[captcha] Gemini API error ${response.status}: ${errorBody}`);
+        throw new Error(`[captcha] OpenAI API error ${response.status}: ${errorBody}`);
     }
 
     const data = await response.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) throw new Error("[captcha] Gemini response had no content");
+    const rawText = data?.choices?.[0]?.message?.content;
+    if (!rawText) throw new Error("[captcha] OpenAI response had no content");
 
     let candidate: string;
     try {
         candidate = JSON.parse(rawText).captchaText?.trim();
     } catch {
-        throw new Error(`[captcha] Gemini response wasn't valid JSON: "${rawText}"`);
+        throw new Error(`[captcha] OpenAI response wasn't valid JSON: "${rawText}"`);
     }
 
     if (!candidate || !PLAUSIBLE_CAPTCHA.test(candidate)) {
-        throw new Error(`[captcha] Gemini returned an implausible captcha value: "${candidate}"`);
+        throw new Error(`[captcha] OpenAI returned an implausible captcha value: "${candidate}"`);
     }
     return candidate;
 }
