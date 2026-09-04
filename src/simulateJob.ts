@@ -139,7 +139,7 @@ async function main() {
         await jobRef.set({
             status: "queued",
             createdAt: FieldValue.serverTimestamp(),
-            userId: docId, // standalone check → userId is its own doc key, matching triggerHighmarkCheck's convention
+            loanApplicationId: docId, // standalone check → userId is its own doc key, matching triggerHighmarkCheck's convention
             firstName: customer.firstName.trim(),
             lastName: customer.lastName.trim(),
             dob: customer.dob.trim(),
