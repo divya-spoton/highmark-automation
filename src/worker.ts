@@ -7,6 +7,8 @@ import { uploadHighmarkPdf } from "./storage";
 import { parseHighmarkPdf } from "./parsing/highmarkParser";
 import { writeHighmarkResult } from "./firestoreWriteback";
 
+const ALLOWED_IDENTIFIER_TYPES = new Set(["pan", "ckyc", "voter", "ration", "other"]);
+
 /**
  * Maps a credit_scores queue doc's raw data into the shape
  * fillAndSubmitInquiryForm expects. Kept as its own function — per the
@@ -15,6 +17,10 @@ import { writeHighmarkResult } from "./firestoreWriteback";
  * needs updating, not scattered across the form-fill logic itself.
  */
 function buildFormData(jobData: FirebaseFirestore.DocumentData): HighmarkFormData {
+    if (!ALLOWED_IDENTIFIER_TYPES.has(jobData.identifierType)) {
+        throw new Error(`[worker] Unknown identifierType "${jobData.identifierType}" on job doc — refusing to run`);
+    }
+
     return {
         firstName: jobData.firstName,
         lastName: jobData.lastName,
@@ -48,7 +54,7 @@ export async function runJob(job: ClaimedJob): Promise<void> {
 
         const formData = buildFormData(data);
 
-         const page = await ensureLoggedIn();
+        const page = await ensureLoggedIn();
         await fillAndSubmitInquiryForm(page, formData);
 
         const pdfBuffer = await pollAndDownloadReport(page);

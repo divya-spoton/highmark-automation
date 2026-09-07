@@ -37,7 +37,7 @@ export interface HighmarkFormData {
     lastName: string;
     dob: string; // DD/MM/YYYY
     fatherName: string;
-    identifierType: "pan" | "ckyc";
+    identifierType: "pan" | "ckyc" | "voter" | "ration" | "other";
     identifierValue: string;
     addressLocality: string;
     addressLine1: string;
@@ -46,7 +46,10 @@ export interface HighmarkFormData {
 
 const IDENTIFIER_FIELD_MAP: Record<string, string> = {
     pan: "pan",
-    ckyc: "ckyc",     // confirm exact field ID against the live form
+    ckyc: "ckyc",
+    voter: "idType2Value",
+    other: "idType5Value",
+    ration: "idType3Value"
 };
 
 function requireField(data: HighmarkFormData, field: keyof HighmarkFormData): string {

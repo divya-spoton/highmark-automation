@@ -4,21 +4,41 @@
 // import mirroring the dashboard's HighmarkCheckModal / triggerHighmarkCheck
 // flow (src/context/DataContext.tsx), so these entries behave identically
 // to a manual "Run Highmark Check" from the CreditCheck page:
-//   - standalone: true   → surfaces on the dashboard's CreditCheck page,
-//                          same as any officer-triggered no-application check
-//   - pan                → explicit join key for migrating a completed
-//                          check into a real loan_applications doc later
-//     (identifierValue already holds the PAN, but a dedicated `pan` field
-//     means a future migration script doesn't have to know identifierType
-//     could theoretically be 'ckyc' — it just reads `pan`)
+//   - standalone: true    → surfaces on the dashboard's CreditCheck page,
+//                           same as any officer-triggered no-application check
+//   - identifierKey       → explicit join key for migrating a completed
+//                           check into a real loan_applications doc later.
+//     Always the uppercased identifierValue, regardless of identifierType —
+//     a future migration script reads THIS field to join, not `pan`, so it
+//     doesn't need to special-case which identifier type a given doc used.
+//   - pan                 → kept ONLY for backward compat with anything that
+//                           already reads `.pan` off these docs. Populated
+//                           ONLY when identifierType === "pan"; null
+//                           otherwise. Do not extend this field to other
+//                           types — that's what identifierKey is for.
 //
 // DOC ID RESOLUTION (per customer):
-//   1. Mobile, normalized to last 10 digits — IF present, valid, and not
-//      already claimed by an earlier customer in this same batch.
-//   2. Otherwise, the PAN (uppercased) — used for customers with no
-//      mobile, an empty mobile, or a mobile that collides with someone
-//      else already queued in this run (this list has three such pairs
-//      where two people share one phone).
+//   1. The identifier value (uppercased) — whatever identifierType says it
+//      is (PAN, CKYC, Ration, Voter, Other/Aadhaar). This is the primary
+//      key, since it's the one guaranteed-unique identifier per person in
+//      this dataset regardless of type.
+//   2. Mobile, normalized to last 10 digits — ONLY used as a fallback if
+//      two customers in this batch somehow share the exact same identifier
+//      value (which would mean a genuine duplicate/typo, not a legitimate
+//      case — this should basically never fire for real data).
+//
+// CONSEQUENCE OF THIS CHOICE: doc IDs in this batch can now be a PAN,
+// CKYC number, Ration Card ID, Voter ID, or Aadhaar/Other ID string — not
+// just a 10-digit phone key. src/utils/highmark.ts's
+// isShadowCreditCheckDocId() (dashboard repo) assumes shadow (no-
+// application) docs are ALWAYS a 10-digit phone key or PAN-shaped string
+// (/^\d{10}$/ or /^[A-Z]{5}\d{4}[A-Z]$/) — that assumption is now wrong for
+// every CKYC/Ration/Voter/Other-keyed doc this script creates, not just
+// PAN-keyed ones. If anything on the dashboard uses that helper to
+// *identify* shadow docs (vs. just format them), it will silently fail to
+// recognize these. Confirm nothing depends on that regex for correctness
+// before treating these as visible to the dashboard the same way a
+// phone-keyed manual check would be.
 //
 // This script ONLY queues Firestore docs — it does not touch the browser
 // or Highmark. Whether these get submitted for REAL depends entirely on
@@ -34,7 +54,8 @@
 //
 // Usage:
 //   npx tsx src/simulateJob.ts
-
+import { installTimestampedLogging } from "./utils/logger";
+installTimestampedLogging();
 import "dotenv/config";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
@@ -48,56 +69,53 @@ initializeApp({
 
 const COLLECTION = "credit_scores";
 
+// Local to this script — this repo (highmark-automation) doesn't share
+// code with ho-dashboard, so it can't import IDENTIFIER_TYPE_LABELS from
+// there. Keep this in sync by hand if the dashboard's label wording changes;
+// it's only used for console output here, nothing functional depends on it.
+const IDENTIFIER_TYPE_LABELS: Record<RawBulkCustomer["identifierType"], string> = {
+    pan: "PAN",
+    ckyc: "CKYC",
+    ration: "Ration Card ID",
+    voter: "Voter ID",
+    other: "Other ID (e.g. Aadhaar)",
+};
+
+const ALLOWED_IDENTIFIER_TYPES = new Set<RawBulkCustomer["identifierType"]>([
+    "pan", "ckyc", "voter", "ration", "other",
+]);
+
 function tenDigitMobile(raw?: string): string | null {
     if (!raw) return null;
     const digits = raw.replace(/\D/g, "");
     return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-type IdSource = "mobile" | "pan";
-
-// DOC ID RESOLUTION (per customer):
-//   1. PAN (uppercased) — the primary key, since it's the one guaranteed-
-//      unique identifier per person in this dataset.
-//   2. Mobile, normalized to last 10 digits — ONLY used as a fallback if
-//      two customers in this batch somehow share the exact same PAN
-//      (which would mean a genuine duplicate/typo, not a legitimate case —
-//      this should basically never fire for real data).
-//
-// CONSEQUENCE OF THIS CHOICE: every doc ID in this batch will now be a PAN
-// string, not a 10-digit number. src/utils/highmark.ts's
-// isShadowCreditCheckDocId() assumes shadow (no-application) docs are
-// ALWAYS 10-digit phone keys (/^\d{10}$/) — that assumption is now wrong
-// for 100% of this batch, not just the edge cases. If anything on the
-// dashboard uses that helper to *identify* shadow docs (vs. just format
-// them), it will silently fail to recognize every doc this script creates.
-// Confirm nothing depends on that regex for correctness before treating
-// these as visible to the dashboard the same way a phone-keyed manual
-// check would be.
+type IdSource = RawBulkCustomer["identifierType"] | "mobile";
 
 function resolveDocId(
     customer: RawBulkCustomer,
     usedIds: Set<string>
 ): { docId: string; idSource: IdSource } {
-    const panKey = customer.identifierValue.trim().toUpperCase();
-    if (!usedIds.has(panKey)) {
-        return { docId: panKey, idSource: "pan" };
+    const idKey = customer.identifierValue.trim().toUpperCase();
+    if (!usedIds.has(idKey)) {
+        return { docId: idKey, idSource: customer.identifierType };
     }
 
-    // PAN already claimed in this batch — should only happen on a genuine
-    // duplicate/typo, not by design. Falling back to mobile rather than
-    // erroring outright, but this case deserves a manual look either way.
+    // Identifier already claimed in this batch — should only happen on a
+    // genuine duplicate/typo, not by design. Falling back to mobile rather
+    // than erroring outright, but this case deserves a manual look either way.
     const mobileKey = tenDigitMobile(customer.mobile);
     if (mobileKey && !usedIds.has(mobileKey)) {
         console.warn(
-            `[bulkSeed] Duplicate PAN "${panKey}" for ${customer.firstName} ${customer.lastName} — ` +
-            `falling back to mobile-keyed ID. Verify this isn't a data entry error.`
+            `[bulkSeed] Duplicate ${IDENTIFIER_TYPE_LABELS[customer.identifierType]} "${idKey}" for ${customer.firstName} ${customer.lastName} — ` +
+            `falling back to mobile-keyed ID.`
         );
         return { docId: mobileKey, idSource: "mobile" };
     }
 
     throw new Error(
-        `[bulkSeed] Duplicate PAN "${panKey}" for ${customer.firstName} ${customer.lastName}, and mobile fallback ` +
+        `[bulkSeed] Duplicate ${IDENTIFIER_TYPE_LABELS[customer.identifierType]} "${idKey}" for ${customer.firstName} ${customer.lastName}, and mobile fallback ` +
         `also unavailable/already claimed — this is a genuine duplicate and needs manual review before seeding.`
     );
 }
@@ -111,6 +129,10 @@ async function main() {
     const errored: { name: string; reason: string }[] = [];
 
     for (const customer of bulkCustomers) {
+        if (!ALLOWED_IDENTIFIER_TYPES.has(customer.identifierType)) {
+            console.error(`[bulkSeed] Skipping ${customer.firstName} ${customer.lastName} — unknown identifierType "${customer.identifierType}"`);
+            continue;
+        }
         const name = `${customer.firstName} ${customer.lastName}`;
         let docId: string;
         let idSource: IdSource;
@@ -134,7 +156,7 @@ async function main() {
             continue;
         }
 
-        const pan = customer.identifierValue.trim().toUpperCase();
+        const identifierKey = customer.identifierValue.trim().toUpperCase();
 
         await jobRef.set({
             status: "queued",
@@ -150,11 +172,12 @@ async function main() {
             addressLine1: customer.addressLine1.trim(),
             addressPinCode: customer.addressPinCode.trim(),
             mobile: customer.mobile || null,
-            pan, // explicit join key for a future migration script into loan_applications
+            identifierKey, // stable join key for a future migration script, regardless of identifierType
+            pan: customer.identifierType === "pan" ? identifierKey : null, // legacy field — PAN only, see header note
             standalone: true, // same field/meaning as the dashboard's CreditCheck page — no linked application yet
             triggeredBy: "bulk-import-script",
             triggeredManually: true,
-            bulkImportDocIdSource: idSource, // "mobile" | "pan" — see file header caveat
+            bulkImportDocIdSource: idSource, // "mobile" | identifierType — see file header caveat
         });
 
         created.push({ docId, idSource, name });
@@ -162,7 +185,8 @@ async function main() {
 
     console.log(`\n[bulkSeed] Created ${created.length} job(s):`);
     for (const c of created) {
-        console.log(`  ${c.idSource === "mobile" ? "⚠️ mobile-fallback" : "🆔 PAN-keyed"}  ${c.docId}  —  ${c.name}`);
+        const tag = c.idSource === "mobile" ? "⚠️ mobile-fallback" : `🆔 ${IDENTIFIER_TYPE_LABELS[c.idSource]}-keyed`;
+        console.log(`  ${tag}  ${c.docId}  —  ${c.name}`);
     }
 
     if (skipped.length > 0) {
@@ -175,10 +199,10 @@ async function main() {
         for (const e of errored) console.log(`  ${e.name} — ${e.reason}`);
     }
 
-    const panFallbackCount = created.filter(c => c.idSource === "pan").length;
+    const mobileFallbackCount = created.filter(c => c.idSource === "mobile").length;
     console.log(
         `\n[bulkSeed] Done. ${created.length} queued, ${skipped.length} skipped, ${errored.length} errored. ` +
-        `${panFallbackCount} landed on the PAN fallback ID.`
+        `${mobileFallbackCount} landed on the mobile fallback ID.`
     );
     process.exit(0);
 }

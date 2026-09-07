@@ -6,6 +6,8 @@ import { recoverOrphanedJobsOnStartup } from "./queue/lock";
 import { startQueueWatcher } from "./queue/listener";
 import { runJob } from "./worker";
 import { browserManager } from "./browser/browserManager";
+import { installTimestampedLogging } from "./utils/logger";
+installTimestampedLogging();
 
 initializeApp({
     credential: cert(JSON.parse(readFileSync(config.firebase.serviceAccountPath, "utf-8"))),

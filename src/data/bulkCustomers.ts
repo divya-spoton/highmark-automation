@@ -9,7 +9,7 @@ export interface RawBulkCustomer {
     lastName: string;
     dob: string; // DD/MM/YYYY
     fatherName: string;
-    identifierType: "pan" | "ckyc";
+    identifierType: "pan" | "ckyc" | "voter" | "ration" | "other";
     identifierValue: string; // PAN or CKYC number
     addressLocality: string;
     addressLine1: string;
