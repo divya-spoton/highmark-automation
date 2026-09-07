@@ -5,7 +5,8 @@ import { fillAndSubmitInquiryForm, HighmarkFormData } from "./automation/inquiry
 import { pollAndDownloadReport } from "./automation/statusPage";
 import { uploadHighmarkPdf } from "./storage";
 import { parseHighmarkPdf } from "./parsing/highmarkParser";
-import { writeHighmarkResult } from "./firestoreWriteback";
+import { writeHighmarkResult } from "./firestoreWriteback"; 
+import { findExistingIdentifierChecks } from "./utils/duplicateCheck";
 
 const ALLOWED_IDENTIFIER_TYPES = new Set(["pan", "ckyc", "voter", "ration", "other"]);
 
@@ -42,6 +43,21 @@ export async function runJob(job: ClaimedJob): Promise<void> {
     console.log(`[worker] Starting job ${creditScoreDocId}`);
 
     try {
+        // Refuse a repeat Highmark inquiry for an identifier already checked
+        // under ANY doc ID (phone-keyed, PAN-keyed, whatever) — this is the
+        // one place every queue producer (dashboard, WhatsApp bot, bulk
+        // scripts) passes through, so it's the only reliable place to catch
+        // this regardless of origin.
+        if (data.identifierType && data.identifierValue) {
+            const dupes = await findExistingIdentifierChecks(data.identifierType, data.identifierValue, creditScoreDocId);
+            if (dupes.length > 0) {
+                const summary = dupes.map((d) => `${d.docId} (${d.status})`).join(", ");
+                throw new Error(
+                    `Duplicate ${data.identifierType.toUpperCase()} ${data.identifierValue} — already checked under: ${summary}. Refusing to run a repeat Highmark inquiry.`
+                );
+            }
+        }
+
         // data.loanApplicationId: for a REAL application check, this is the
         // loan_applications doc to write highmark_data onto. For a
         // STANDALONE/manual check (no real application), the dashboard sets

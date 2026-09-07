@@ -62,6 +62,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { readFileSync } from "fs";
 import { config } from "./config";
 import { bulkCustomers, RawBulkCustomer } from "./data/bulkCustomers";
+import { findExistingIdentifierChecks } from "./utils/duplicateCheck";
 
 initializeApp({
     credential: cert(JSON.parse(readFileSync(config.firebase.serviceAccountPath, "utf-8"))),
@@ -144,6 +145,16 @@ async function main() {
             continue;
         }
         usedIds.add(docId);
+
+        const dupes = await findExistingIdentifierChecks(customer.identifierType, customer.identifierValue, docId);
+        if (dupes.length > 0) {
+            skipped.push({
+                docId,
+                name,
+                reason: `${IDENTIFIER_TYPE_LABELS[customer.identifierType]} already checked under: ${dupes.map(d => `${d.docId} (${d.status})`).join(", ")}`,
+            });
+            continue;
+        }
 
         const jobRef = db.collection(COLLECTION).doc(docId);
         const existing = await jobRef.get();
