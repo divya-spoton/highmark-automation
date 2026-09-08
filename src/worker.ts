@@ -2,11 +2,28 @@
 import { ClaimedJob, markComplete, markFailed } from "./queue/lock";
 import { ensureLoggedIn } from "./automation/login";
 import { fillAndSubmitInquiryForm, HighmarkFormData } from "./automation/inquiryForm";
-import { pollAndDownloadReport } from "./automation/statusPage";
+import { getCurrentTopReportId, pollAndDownloadReport } from "./automation/statusPage";
 import { uploadHighmarkPdf } from "./storage";
-import { parseHighmarkPdf } from "./parsing/highmarkParser";
+import { HighmarkExtractedData, parseHighmarkPdf } from "./parsing/highmarkParser";
 import { writeHighmarkResult } from "./firestoreWriteback"; 
 import { findExistingIdentifierChecks } from "./utils/duplicateCheck";
+
+
+function normalizeNameTokens(name: string): string[] {
+    return name.toUpperCase().replace(/\b(MR|MRS|MS|SHRI|SMT)\b/g, "").split(/\s+/).filter(Boolean).sort();
+}
+
+function assertParsedMatchesSubmission(parsed: HighmarkExtractedData, formData: HighmarkFormData): void {
+    const submitted = normalizeNameTokens(`${formData.firstName} ${formData.lastName}`);
+    const parsedName = normalizeNameTokens(parsed.user_details?.name ?? "");
+    const overlap = submitted.filter((t) => parsedName.includes(t));
+
+    if (overlap.length < Math.min(2, submitted.length)) {
+        throw new Error(
+            `[worker] CRITICAL: parsed PDF name "${parsed.user_details?.name}" does not match submitted applicant "${formData.firstName} ${formData.lastName}" — refusing to write this data anywhere. Job will be marked failed for manual review; do NOT retry blindly, check which customer's data this actually belongs to first.`
+        );
+    }
+}
 
 const ALLOWED_IDENTIFIER_TYPES = new Set(["pan", "ckyc", "voter", "ration", "other"]);
 
@@ -71,12 +88,23 @@ export async function runJob(job: ClaimedJob): Promise<void> {
         const formData = buildFormData(data);
 
         const page = await ensureLoggedIn();
+
+        const baselineReportId = await getCurrentTopReportId(page);
+
         await fillAndSubmitInquiryForm(page, formData);
 
-        const pdfBuffer = await pollAndDownloadReport(page);
+        const pdfBuffer = await pollAndDownloadReport(
+            page,
+            { firstName: formData.firstName, lastName: formData.lastName, dob: formData.dob },
+            baselineReportId
+        );
 
         const storagePath = await uploadHighmarkPdf(creditScoreDocId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
+
+        // LAST LINE OF DEFENSE: even if the portal-side identity check above has
+        // a bug we haven't hit yet, never let mismatched data reach Firestore.
+        assertParsedMatchesSubmission(parsed, formData);
 
         await writeHighmarkResult({
             creditScoreDocId,

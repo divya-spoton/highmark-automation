@@ -13,14 +13,14 @@ interface WriteHighmarkResultInput {
 }
 
 /**
- * Real applications (standalone === false): writes to
- *   loan_applications/{loanApplicationId}.highmark_data[creditScoreDocId]
- * as a sibling field, merge — never overwrites anything else on that doc.
+ * Standalone (no real application): credit_scores ONLY. Never touches
+ * loan_applications.
  *
- * Standalone/manual checks (standalone === true, no real application exists):
- * writes directly onto
- *   credit_scores/{creditScoreDocId}.highmark_data
- * NEVER creates a loan_applications doc for these.
+ * Real application: writes to credit_scores unconditionally (source of
+ * truth going forward), AND mirrors onto loan_applications for backward
+ * compatibility with older readers — but ONLY if loanApplicationId
+ * actually resolves to an existing doc. Never blind-merge into
+ * loan_applications; that's exactly the bug this whole change started from.
  */
 export async function writeHighmarkResult({
     creditScoreDocId,
@@ -37,16 +37,33 @@ export async function writeHighmarkResult({
         fetched_at: FieldValue.serverTimestamp(),
     };
 
+    const db = getFirestore();
+    const creditScoreRef = db.collection("credit_scores").doc(creditScoreDocId);
+
     if (standalone) {
-        await getFirestore().collection("credit_scores").doc(creditScoreDocId).set(
-            { highmark_data: reportPayload },
-            { merge: true }
-        );
+        await creditScoreRef.set({ highmark_data: reportPayload }, { merge: true });
         return;
     }
 
-    await getFirestore().collection("loan_applications").doc(loanApplicationId).set(
-        { highmark_data: { [creditScoreDocId]: reportPayload } },
-        { merge: true }
-    );
+    const appRef = db.collection("loan_applications").doc(loanApplicationId);
+    const appSnap = await appRef.get();
+
+    const writes: Promise<unknown>[] = [
+        creditScoreRef.set({ highmark_data: reportPayload }, { merge: true }),
+    ];
+
+    if (appSnap.exists) {
+        writes.push(
+            appRef.set(
+                { highmark_data: { [creditScoreDocId]: reportPayload } },
+                { merge: true }
+            )
+        );
+    } else {
+        console.warn(
+            `[writeHighmarkResult] loan_applications/${loanApplicationId} does not exist — skipping legacy mirror. credit_scores/${creditScoreDocId} was still updated.`
+        );
+    }
+
+    await Promise.all(writes);
 }

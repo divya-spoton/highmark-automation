@@ -1,6 +1,76 @@
 import { Page } from "playwright";
 import { dismissStayLoggedInPopup } from "./login";
 
+export interface ExpectedApplicant {
+    firstName: string;
+    lastName: string;
+    dob: string; // DD/MM/YYYY, as submitted
+}
+
+interface RowSnapshot {
+    reportId: string;
+    memberName: string;
+    dob: string | null;
+    hasPdfReady: boolean;
+    pdfLocator: ReturnType<Page["locator"]>;
+}
+
+/** Call this BEFORE fillAndSubmitInquiryForm, to know what "new" means. */
+export async function getCurrentTopReportId(page: Page): Promise<string | null> {
+    await navigateToStatusPage(page);
+    const top = await readTopRow(page);
+    return top?.reportId ?? null;
+}
+
+async function readTopRow(page: Page): Promise<RowSnapshot | null> {
+    const rows = page.locator("#cust tbody tr");
+    if ((await rows.count()) === 0) return null;
+
+    const row = rows.first();
+    const cells = row.locator("td");
+
+    const reportId = (await cells.nth(0).innerText()).trim();
+    const memberName = (await cells.nth(7).innerText()).trim();
+
+    // The Inquiry Details cell's content lives in a tooltip <span> that's
+    // hidden until hover (class="info" pattern) — innerText() respects
+    // visibility and will return "" for it, so use textContent() instead.
+    const detailsText = (await cells.nth(6).textContent()) ?? "";
+    const dobMatch = detailsText.match(/Dob\s*:\s*([\d-]{8,10})/);
+    const dob = dobMatch ? dobMatch[1] : null;
+
+    const pdfLocator = row.locator("a", { has: page.locator("img[alt='PDF Report']") });
+    const hasPdfReady = (await pdfLocator.count()) > 0;
+
+    return { reportId, memberName, dob, hasPdfReady, pdfLocator };
+}
+
+function normalizeNameTokens(name: string): string[] {
+    return name
+        .toUpperCase()
+        .replace(/\b(MR|MRS|MS|SHRI|SMT)\b/g, "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .sort();
+}
+
+function namesMatch(portalName: string, expected: ExpectedApplicant): boolean {
+    const a = normalizeNameTokens(portalName);
+    const b = normalizeNameTokens(`${expected.firstName} ${expected.lastName}`);
+    const overlap = a.filter((t) => b.includes(t));
+    // Require at least 2 overlapping tokens (or all of them, if the name is
+    // a single word) — a single shared common word (e.g. two "Sethi"s) is
+    // not enough to trust with a financial document.
+    return overlap.length >= Math.min(2, b.length);
+}
+
+function dobMatches(portalDob: string | null, expectedDob: string): boolean {
+    if (!portalDob) return true; // portal leaves this blank sometimes — don't hard-fail on absence
+    const [d, m, y] = expectedDob.split("/");
+    const normalized = `${d.padStart(2, "0")}-${m.padStart(2, "0")}-${y}`;
+    return portalDob === normalized;
+}
+
 /**
  * After a successful inquiry submission, Highmark takes some time to
  * generate the report. This polls the "Single Request Status" page
@@ -36,26 +106,40 @@ import { dismissStayLoggedInPopup } from "./login";
 const POLL_INTERVAL_MS = 30_000;
 const MAX_POLL_ATTEMPTS = 20; // 20 × 30s = 10 minutes total, matching your original estimate
 
-export async function pollAndDownloadReport(page: Page): Promise<Buffer> {
+export async function pollAndDownloadReport(
+    page: Page,
+    expected: ExpectedApplicant,
+    baselineReportId: string | null
+): Promise<Buffer> {
     await navigateToStatusPage(page);
 
     for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
         console.log(`[statusPage] Poll attempt ${attempt}/${MAX_POLL_ATTEMPTS}`);
-
-        // Re-navigate/refresh each attempt — the status page likely needs a
-        // reload to show a newly-ready report, it won't update live on its own.
         await page.reload({ waitUntil: "domcontentloaded" });
         await dismissStayLoggedInPopup(page);
 
-        const pdfLink = page.locator("(//img[@alt='PDF Report']/parent::a)[1]");
-        const isReady = await pdfLink
-            .waitFor({ state: "visible", timeout: 5_000 })
-            .then(() => true)
-            .catch(() => false);
+        const top = await readTopRow(page);
 
-        if (isReady) {
-            console.log("[statusPage] PDF ready — downloading");
-            return await downloadPdf(page, pdfLink);
+        if (!top) {
+            console.log("[statusPage] No rows in table yet");
+        } else if (top.reportId === baselineReportId) {
+            console.log(`[statusPage] Top row (${top.reportId}) unchanged from baseline — our submission hasn't landed yet`);
+        } else if (!namesMatch(top.memberName, expected)) {
+            // The top row changed, but it's not our submission. This should
+            // never happen if the submit actually went through — surfacing
+            // it loudly rather than downloading a stranger's report.
+            throw new Error(
+                `[statusPage] New top row "${top.reportId}" ("${top.memberName}") does not match expected applicant "${expected.firstName} ${expected.lastName}" — refusing to download. This almost certainly means the inquiry submission failed silently.`
+            );
+        } else if (!dobMatches(top.dob, expected.dob)) {
+            throw new Error(
+                `[statusPage] Top row "${top.reportId}" matched by name but DOB "${top.dob}" != expected "${expected.dob}" — refusing to download as a precaution.`
+            );
+        } else if (top.hasPdfReady) {
+            console.log(`[statusPage] Verified match on "${top.memberName}" (${top.reportId}) — downloading`);
+            return await downloadPdf(page, top.pdfLocator);
+        } else {
+            console.log(`[statusPage] Correct row ("${top.memberName}", ${top.reportId}) found, PDF not generated yet`);
         }
 
         if (attempt < MAX_POLL_ATTEMPTS) {
@@ -64,7 +148,7 @@ export async function pollAndDownloadReport(page: Page): Promise<Buffer> {
     }
 
     throw new Error(
-        `[statusPage] Report not ready after ${MAX_POLL_ATTEMPTS} attempts (${(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS) / 60_000} min) — Highmark may be delayed or the submission failed silently`
+        `[statusPage] No matching, ready report for "${expected.firstName} ${expected.lastName}" after ${MAX_POLL_ATTEMPTS} attempts — either Highmark is delayed, or the submission never went through. Not downloading anything.`
     );
 }
 
