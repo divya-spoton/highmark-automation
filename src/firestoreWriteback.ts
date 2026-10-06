@@ -2,9 +2,9 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { HighmarkExtractedData } from "./parsing/highmarkParser";
 
 interface WriteHighmarkResultInput {
-    /** credit_scores/{this} — the phone (10-digit) or PAN this check was queued under. */
+    /** credit_scores/{this} — the phone (10-digit), PAN, CKYC etc. this check was queued under. */
     creditScoreDocId: string;
-    /** loan_applications/{this} — only read/used when standalone === false. */
+    /** loan_applications/{this} the check belongs to. Only stored (as a join key) when standalone is false. */
     loanApplicationId: string;
     storagePath: string;
     parsed: HighmarkExtractedData;
@@ -13,14 +13,13 @@ interface WriteHighmarkResultInput {
 }
 
 /**
- * Standalone (no real application): credit_scores ONLY. Never touches
- * loan_applications.
+ * Every Highmark result is written ONLY to credit_scores/{creditScoreDocId}.
+ * loan_applications is never written to.
  *
- * Real application: writes to credit_scores unconditionally (source of
- * truth going forward), AND mirrors onto loan_applications for backward
- * compatibility with older readers — but ONLY if loanApplicationId
- * actually resolves to an existing doc. Never blind-merge into
- * loan_applications; that's exactly the bug this whole change started from.
+ * If the check belongs to a real loan application, that application's ID is
+ * stored on the credit_scores doc as `loanApplicationId`, so the two can be
+ * joined later. For standalone checks there is no application, so no
+ * reference is written here.
  */
 export async function writeHighmarkResult({
     creditScoreDocId,
@@ -37,33 +36,10 @@ export async function writeHighmarkResult({
         fetched_at: FieldValue.serverTimestamp(),
     };
 
-    const db = getFirestore();
-    const creditScoreRef = db.collection("credit_scores").doc(creditScoreDocId);
-
-    if (standalone) {
-        await creditScoreRef.set({ highmark_data: reportPayload }, { merge: true });
-        return;
+    const update: Record<string, unknown> = { highmark_data: reportPayload };
+    if (!standalone) {
+        update.loanApplicationId = loanApplicationId;
     }
 
-    const appRef = db.collection("loan_applications").doc(loanApplicationId);
-    const appSnap = await appRef.get();
-
-    const writes: Promise<unknown>[] = [
-        creditScoreRef.set({ highmark_data: reportPayload }, { merge: true }),
-    ];
-
-    if (appSnap.exists) {
-        writes.push(
-            appRef.set(
-                { highmark_data: { [creditScoreDocId]: reportPayload } },
-                { merge: true }
-            )
-        );
-    } else {
-        console.warn(
-            `[writeHighmarkResult] loan_applications/${loanApplicationId} does not exist — skipping legacy mirror. credit_scores/${creditScoreDocId} was still updated.`
-        );
-    }
-
-    await Promise.all(writes);
+    await getFirestore().collection("credit_scores").doc(creditScoreDocId).set(update, { merge: true });
 }

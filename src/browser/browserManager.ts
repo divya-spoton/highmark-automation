@@ -31,9 +31,14 @@ export class BrowserManager {
     private async ensureRunning(): Promise<void> {
         if (this.browser?.isConnected() && this.context) return;
 
-        console.log("[browserManager] Launching Chromium + session context...");
+        // Defaults to headless (matches the droplet, which never sets this) —
+        // set HEADLESS=false in your LOCAL .env only, to watch the browser
+        // during a manual test. Never set on the deployed container (no
+        // display there; chromium.launch({headless:false}) would just fail).
+        const headless = process.env.HEADLESS !== "false";
+        console.log(`[browserManager] Launching Chromium (headless=${headless}) + session context...`);
         this.browser = await chromium.launch({
-            headless: true,
+            headless,
             args: ["--no-sandbox", "--disable-dev-shm-usage"],
         });
         this.browser.on("disconnected", () => {

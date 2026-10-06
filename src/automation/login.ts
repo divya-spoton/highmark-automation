@@ -99,25 +99,84 @@ async function performLogin(page: Page): Promise<void> {
     for (let attempt = 1; attempt <= MAX_CAPTCHA_ATTEMPTS; attempt++) {
         console.log(`[login] Attempt ${attempt}/${MAX_CAPTCHA_ATTEMPTS}`);
 
-        await page.goto(config.highmark.loginUrl, { waitUntil: "domcontentloaded" });
-        await page.fill("#username", config.highmark.username);
-        await page.fill("#password", config.highmark.password);
+        try {
+            // "load" (not "domcontentloaded"): the button-enabling script
+            // (checkFormValidity + whatever else initializes this page)
+            // isn't guaranteed to have finished running just because the
+            // HTML has been parsed. Giving it the full load event reduces
+            // — though per the comment below, doesn't by itself eliminate —
+            // the chance we act before that script is ready.
+            await page.goto(config.highmark.loginUrl, { waitUntil: "load" });
+            await page.fill("#username", config.highmark.username);
+            await page.fill("#password", config.highmark.password);
 
-        const captchaImage = await page.locator("#captchaId").screenshot();
-        const captchaText = await solveCaptcha(captchaImage);
-        await page.fill("#captchavalue", captchaText);
-        await page.click("#loginButton");
+            const captchaImage = await page.locator("#captchaId").screenshot();
+            const captchaText = await solveCaptcha(captchaImage);
+            await page.fill("#captchavalue", captchaText);
 
-        // Wait a beat for the page to settle, then let isLoggedIn (checked by
-        // the caller) be the real judge — this inner check just decides
-        // whether to retry the captcha or not.
-        await page.waitForTimeout(2_000);
-        if (await isLoggedIn(page)) {
-            console.log("[login] Success");
-            return;
+            // #loginButton starts `disabled` in the markup. Highmark's own
+            // JS enables it via checkFormValidity(), wired to onkeyup on
+            // #username and #password ONLY — #captchavalue has no such
+            // handler at all (confirmed from the page's source). Since
+            // captcha is necessarily the last field we fill, nothing ever
+            // re-runs that check afterward, so the button stays disabled no
+            // matter how the fields are filled (page.fill(), real
+            // keystrokes, whatever) — this part is a permanent gap in fill
+            // order vs. the one thing that triggers the check, not a timing
+            // fluke. Call the site's own validator directly instead of
+            // relying on it firing implicitly.
+            //
+            // Wait for the function to exist first: if Highmark's own JS
+            // hasn't finished initializing yet (see "load" comment above),
+            // calling it too early is a silent no-op, not an error.
+            await page
+                .waitForFunction(() => typeof (window as unknown as { checkFormValidity?: unknown }).checkFormValidity === "function", undefined, {
+                    timeout: 10_000,
+                })
+                .catch(() => console.warn("[login] window.checkFormValidity never appeared — Highmark's login page JS may have changed or failed to load"));
+
+            await page.evaluate(() => {
+                const fn = (window as unknown as { checkFormValidity?: () => void }).checkFormValidity;
+                if (typeof fn === "function") fn();
+            });
+
+            // Fast, clearly-labeled failure if the above didn't actually
+            // enable it, instead of a bare 30s click timeout with no
+            // diagnostic.
+            await page
+                .waitForFunction(
+                    () => !(document.querySelector("#loginButton") as HTMLInputElement | null)?.disabled,
+                    undefined,
+                    { timeout: 5_000 }
+                )
+                .catch(() =>
+                    console.warn("[login] #loginButton still disabled 5s after calling checkFormValidity() — clicking anyway (will likely time out)")
+                );
+
+            await page.click("#loginButton");
+
+            // Wait a beat for the page to settle, then let isLoggedIn
+            // (checked by the caller) be the real judge — this inner check
+            // just decides whether to retry the captcha or not.
+            await page.waitForTimeout(2_000);
+            if (await isLoggedIn(page)) {
+                console.log("[login] Success");
+                return;
+            }
+
+            console.warn(`[login] Attempt ${attempt} failed`);
+        } catch (err) {
+            // IMPORTANT: this catch is what makes MAX_CAPTCHA_ATTEMPTS mean
+            // what it says. Without it, a page.click()/waitForFunction
+            // timeout (or any other Playwright action timeout) throws past
+            // this loop on the very first attempt, and the caller's single
+            // browser-recycle retry becomes the ONLY other chance — 2 real
+            // attempts total instead of the intended 3+1. A thrown timeout
+            // here almost always means "this specific page load was bad,"
+            // which the next loop iteration's fresh page.goto() is exactly
+            // positioned to recover from.
+            console.warn(`[login] Attempt ${attempt} threw:`, err instanceof Error ? err.message : err);
         }
-
-        console.warn(`[login] Attempt ${attempt} failed`);
     }
 
     throw new Error(`[login] Failed after ${MAX_CAPTCHA_ATTEMPTS} captcha attempts`);
