@@ -36,7 +36,14 @@ export async function writeHighmarkResult({
         fetched_at: FieldValue.serverTimestamp(),
     };
 
-    const update: Record<string, unknown> = { highmark_data: reportPayload };
+    // rawExtractedText is written in the same write as highmark_data so the
+    // onHighmarkReportParsed Cloud Function sees both together. This only runs
+    // after assertParsedMatchesSubmission passes, so a mismatched report is
+    // never summarised.
+    const update: Record<string, unknown> = {
+        highmark_data: reportPayload,
+        rawExtractedText: parsed.raw_text,
+    };
     if (!standalone) {
         update.loanApplicationId = loanApplicationId;
     }
