@@ -25,6 +25,8 @@ export interface HighmarkExtractedData {
   user_details: HighmarkClientDetails;
   attributes: Record<string, string>;
   score: HighmarkScore;
+  /** Full extracted text — summarised by the onHighmarkReportParsed Cloud Function. */
+  raw_text: string;
 }
 
 function getSection(text: string, section: string, nextSection: string): string {
@@ -195,11 +197,17 @@ export async function parseHighmarkPdf(pdfBuffer: Buffer): Promise<HighmarkExtra
   // v2 API: pass raw PDF bytes via the `data` property.
   // PDFParse's constructor explicitly handles Buffer → Uint8Array conversion.
   const parser = new PDFParse({ data: pdfBuffer });
-  const { text } = await parser.getText();
+  let text: string;
+  try {
+    ({ text } = await parser.getText());
+  } finally {
+    await parser.destroy();
+  }
 
   return {
     user_details: getClientDetails(text),
     attributes: getPerformanceAttributes(text),
     score: getScore(text),
+    raw_text: text,
   };
 }
