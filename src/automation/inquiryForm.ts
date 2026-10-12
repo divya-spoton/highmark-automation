@@ -1,5 +1,6 @@
 import { Page } from "playwright";
 import { config } from "../config";
+import { clickAndWaitForNavigation } from "./navigation";
 
 /**
  * Fills and submits Highmark's "Single Request" inquiry form.
@@ -105,13 +106,12 @@ export async function fillAndSubmitInquiryForm(page: Page, data: HighmarkFormDat
         return;
     }
 
-    await page.click("#btnSubNewInquiry1");
-
-    // Confirm submission actually succeeded — don't assume a click that
-    // didn't throw means the form was accepted. Adjust the selector below
-    // once you've seen what a real success state looks like (confirmation
-    // banner, redirect, etc.) — this is a placeholder pending that.
-    await page.waitForTimeout(2_000);
+    // Wait for the submit's own navigation to finish before anything else
+    // touches the page — navigating away mid-submit is how we ended up
+    // unsure whether an inquiry went through. Never retry the click here:
+    // a second click is a second paid inquiry.
+    // If it doesn't navigate at all, the status page is the judge.
+    await clickAndWaitForNavigation(page, page.locator("#btnSubNewInquiry1"), { timeoutMs: 60_000, optional: true });
 }
 
 /**
@@ -132,5 +132,5 @@ async function navigateToSingleRequest(page: Page): Promise<void> {
 
     // Step 3: CIR PRO V2 should now be visible → click it
     const cirProV2 = consumerBureau.locator("a", { hasText: "CIR PRO V2" });
-    await cirProV2.click();
+    await clickAndWaitForNavigation(page, cirProV2);
 }

@@ -1,5 +1,6 @@
 import { Page } from "playwright";
 import { dismissStayLoggedInPopup } from "./login";
+import { clickAndWaitForNavigation } from "./navigation";
 
 export interface ExpectedApplicant {
     firstName: string;
@@ -11,38 +12,98 @@ interface RowSnapshot {
     reportId: string;
     memberName: string;
     dob: string | null;
+    status: string;
+    requestedAt: number | null; // epoch ms, parsed from the Date:Time column (IST)
     hasPdfReady: boolean;
     pdfLocator: ReturnType<Page["locator"]>;
 }
 
-/** Call this BEFORE fillAndSubmitInquiryForm, to know what "new" means. */
-export async function getCurrentTopReportId(page: Page): Promise<string | null> {
-    await navigateToStatusPage(page);
-    const top = await readTopRow(page);
-    return top?.reportId ?? null;
+export interface StatusPageCheck {
+    /** A recent, non-failed row for this applicant that is already on the portal — reuse it instead of submitting. */
+    existingReportId: string | null;
+    /** Every report ID visible before we (maybe) submit — anything not in here afterwards is new. */
+    knownReportIds: Set<string>;
 }
 
-async function readTopRow(page: Page): Promise<RowSnapshot | null> {
+/**
+ * How old an existing report on the status page may be and still be reused
+ * instead of paying for a fresh inquiry. Covers the "previous attempt
+ * submitted but failed to download, job was requeued" case, which is exactly
+ * what was burning duplicate inquiries.
+ */
+const REUSE_MAX_AGE_HOURS = 24;
+
+const FAILED_STATUS_PATTERN = /fail|error|reject|invalid/i;
+
+/**
+ * Call this BEFORE fillAndSubmitInquiryForm. Opens the status page and
+ * (a) looks for a report for this applicant that already exists, so the
+ * caller can skip submitting entirely, and (b) records every report ID
+ * currently listed, so a new one can be told apart after submission.
+ */
+export async function checkStatusPage(page: Page, expected: ExpectedApplicant): Promise<StatusPageCheck> {
+    await navigateToStatusPage(page);
+    const rows = await readAllRows(page);
+    const knownReportIds = new Set(rows.map((r) => r.reportId));
+
+    const existing = findApplicantRow(rows, expected, (r) => isRecent(r) && !FAILED_STATUS_PATTERN.test(r.status));
+    if (existing) {
+        console.log(
+            `[statusPage] Existing report for "${existing.memberName}" (${existing.reportId}, status "${existing.status}") found — reusing it, NOT submitting a new inquiry`
+        );
+    }
+
+    return { existingReportId: existing?.reportId ?? null, knownReportIds };
+}
+
+async function readAllRows(page: Page): Promise<RowSnapshot[]> {
     const rows = page.locator("#cust tbody tr");
-    if ((await rows.count()) === 0) return null;
+    const count = await rows.count();
+    const snapshots: RowSnapshot[] = [];
 
-    const row = rows.first();
-    const cells = row.locator("td");
+    for (let i = 0; i < count; i++) {
+        const row = rows.nth(i);
+        const cells = row.locator("td");
+        if ((await cells.count()) < 8) continue; // "nothing found" placeholder row, or similar
 
-    const reportId = (await cells.nth(0).innerText()).trim();
-    const memberName = (await cells.nth(7).innerText()).trim();
+        const reportId = (await cells.nth(0).innerText()).trim();
+        const dateTime = (await cells.nth(1).innerText()).trim();
+        const memberName = (await cells.nth(7).innerText()).trim();
 
-    // The Inquiry Details cell's content lives in a tooltip <span> that's
-    // hidden until hover (class="info" pattern) — innerText() respects
-    // visibility and will return "" for it, so use textContent() instead.
-    const detailsText = (await cells.nth(6).textContent()) ?? "";
-    const dobMatch = detailsText.match(/Dob\s*:\s*([\d-]{8,10})/);
-    const dob = dobMatch ? dobMatch[1] : null;
+        // Status and Inquiry Details text live in tooltip <span>s that are
+        // hidden until hover (class="info" pattern) — innerText() respects
+        // visibility and returns "" for them, so use textContent() instead.
+        const status = ((await cells.nth(2).textContent()) ?? "").trim();
+        const detailsText = (await cells.nth(6).textContent()) ?? "";
+        const dobMatch = detailsText.match(/Dob\s*:\s*([\d-]{8,10})/);
+        const dob = dobMatch ? dobMatch[1] : null;
 
-    const pdfLocator = row.locator("a", { has: page.locator("img[alt='PDF Report']") });
-    const hasPdfReady = (await pdfLocator.count()) > 0;
+        const pdfLocator = row.locator("a", { has: page.locator("img[alt='PDF Report']") });
+        const hasPdfReady = (await pdfLocator.count()) > 0;
 
-    return { reportId, memberName, dob, hasPdfReady, pdfLocator };
+        snapshots.push({ reportId, memberName, dob, status, requestedAt: parsePortalDateTime(dateTime), hasPdfReady, pdfLocator });
+    }
+
+    return snapshots;
+}
+
+/** "12/10/2026 12:59 PM" (DD/MM/YYYY, portal time = IST) → epoch ms. */
+function parsePortalDateTime(text: string): number | null {
+    const m = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!m) return null;
+    const [, d, mo, y, h, min, ampm] = m;
+    let hour = Number(h) % 12;
+    if (ampm.toUpperCase() === "PM") hour += 12;
+    const iso = `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${min}:00+05:30`;
+    const ms = Date.parse(iso);
+    return Number.isNaN(ms) ? null : ms;
+}
+
+function isRecent(row: RowSnapshot): boolean {
+    // Unparseable date → don't reuse; paying for a fresh report beats
+    // handing back one of unknown age.
+    if (row.requestedAt === null) return false;
+    return Date.now() - row.requestedAt <= REUSE_MAX_AGE_HOURS * 60 * 60 * 1000;
 }
 
 function normalizeNameTokens(name: string): string[] {
@@ -72,74 +133,74 @@ function dobMatches(portalDob: string | null, expectedDob: string): boolean {
 }
 
 /**
- * After a successful inquiry submission, Highmark takes some time to
- * generate the report. This polls the "Single Request Status" page
- * until today's top row has a downloadable PDF, then downloads it.
+ * Newest row matching this applicant by name AND DOB (plus any extra
+ * filter). Scans the whole table rather than trusting the top row: the
+ * table's order isn't something we control, and a single unexpected row on
+ * top used to fail the job outright — which then got requeued and paid for
+ * a second inquiry.
+ */
+function findApplicantRow(
+    rows: RowSnapshot[],
+    expected: ExpectedApplicant,
+    filter: (row: RowSnapshot) => boolean = () => true
+): RowSnapshot | null {
+    const matches = rows.filter((r) => namesMatch(r.memberName, expected) && dobMatches(r.dob, expected.dob) && filter(r));
+    // Stable sort: rows with equal/unknown times keep table order (newest first).
+    matches.sort((a, b) => (b.requestedAt ?? 0) - (a.requestedAt ?? 0));
+    return matches[0] ?? null;
+}
+
+/**
+ * Highmark takes some time to generate the report. This polls the
+ * "Single Request Status" page until the applicant's row has a
+ * downloadable PDF, then downloads it.
  *
- * Design decisions vs. HMFunctions.py's download_report:
+ * - Every poll re-opens the page through the menu instead of
+ *   `page.reload()`. Reload raced the menu click's navigation (reloading
+ *   the previous page, so we saw "no rows" while the real page had them,
+ *   or crashed with "Not attached to an active page"), and reloading a
+ *   page that was the result of a form POST risks re-submitting it.
  *
- * - Bounded polling, not a single check. The reference code does one
- *   `time.sleep()`-free attempt via WebDriverWait with a 10s timeout —
- *   fine if the report is already ready, but Highmark's own report
- *   generation can take minutes, which the original flow handled by
- *   the OUTER script's own delay before calling download_report at all.
- *   Here, polling is explicit and visible in one place instead of
- *   implicit in caller timing.
- *
- * - "Top row" is fetched, not assumed pre-verified. Given your own
- *   stated constraint (only one Highmark run happens at a time, ever),
- *   the top row of today's results IS necessarily the one we just
- *   submitted — there's no other request that could have landed there
- *   in between, since nothing else runs concurrently. Still, we log
- *   what we're about to download so it's auditable after the fact if
- *   something ever looks wrong (e.g. checking logs against Firestore).
+ * - The row we want is identified by name + DOB, and either a specific
+ *   report ID (when reusing an existing report) or "not in the set of
+ *   report IDs seen before we submitted". Unrelated rows are ignored, not
+ *   treated as fatal.
  *
  * - Uses Playwright's `page.waitForEvent('download')` around the click,
- *   which is the correct Playwright-native way to capture a file
- *   download — NOT reading from a local Downloads folder afterward like
- *   File-Listener.py does. This is a meaningful improvement: no watching
- *   a filesystem, no guessing when a download finished, no separate
- *   process needed at all. The PDF bytes are available directly in
- *   memory as soon as the download completes.
+ *   so the PDF bytes come straight back in memory — no Downloads folder
+ *   watching.
  */
-
 const POLL_INTERVAL_MS = 30_000;
-const MAX_POLL_ATTEMPTS = 20; // 20 × 30s = 10 minutes total, matching your original estimate
+const MAX_POLL_ATTEMPTS = 20; // 20 × 30s = 10 minutes total
 
 export async function pollAndDownloadReport(
     page: Page,
     expected: ExpectedApplicant,
-    baselineReportId: string | null
+    target: { reportId: string } | { knownReportIds: Set<string> }
 ): Promise<Buffer> {
-    await navigateToStatusPage(page);
+    const pick = (rows: RowSnapshot[]) =>
+        "reportId" in target
+            ? findApplicantRow(rows, expected, (r) => r.reportId === target.reportId)
+            : findApplicantRow(rows, expected, (r) => !target.knownReportIds.has(r.reportId));
 
     for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
         console.log(`[statusPage] Poll attempt ${attempt}/${MAX_POLL_ATTEMPTS}`);
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await dismissStayLoggedInPopup(page);
+        await navigateToStatusPage(page);
 
-        const top = await readTopRow(page);
+        const rows = await readAllRows(page);
+        const row = pick(rows);
 
-        if (!top) {
+        if (rows.length === 0) {
             console.log("[statusPage] No rows in table yet");
-        } else if (top.reportId === baselineReportId) {
-            console.log(`[statusPage] Top row (${top.reportId}) unchanged from baseline — our submission hasn't landed yet`);
-        } else if (!namesMatch(top.memberName, expected)) {
-            // The top row changed, but it's not our submission. This should
-            // never happen if the submit actually went through — surfacing
-            // it loudly rather than downloading a stranger's report.
-            throw new Error(
-                `[statusPage] New top row "${top.reportId}" ("${top.memberName}") does not match expected applicant "${expected.firstName} ${expected.lastName}" — refusing to download. This almost certainly means the inquiry submission failed silently.`
-            );
-        } else if (!dobMatches(top.dob, expected.dob)) {
-            throw new Error(
-                `[statusPage] Top row "${top.reportId}" matched by name but DOB "${top.dob}" != expected "${expected.dob}" — refusing to download as a precaution.`
-            );
-        } else if (top.hasPdfReady) {
-            console.log(`[statusPage] Verified match on "${top.memberName}" (${top.reportId}) — downloading`);
-            return await downloadPdf(page, top.pdfLocator);
+        } else if (!row) {
+            console.log(`[statusPage] ${rows.length} row(s) listed, none for "${expected.firstName} ${expected.lastName}" yet (top: ${rows[0].reportId} "${rows[0].memberName}")`);
+        } else if (row.hasPdfReady) {
+            console.log(`[statusPage] Verified match on "${row.memberName}" (${row.reportId}) — downloading`);
+            return await downloadPdf(page, row.pdfLocator);
+        } else if (FAILED_STATUS_PATTERN.test(row.status)) {
+            throw new Error(`[statusPage] Highmark reports status "${row.status}" for "${row.memberName}" (${row.reportId}) — no report to download.`);
         } else {
-            console.log(`[statusPage] Correct row ("${top.memberName}", ${top.reportId}) found, PDF not generated yet`);
+            console.log(`[statusPage] Correct row ("${row.memberName}", ${row.reportId}, status "${row.status}") found, PDF not generated yet`);
         }
 
         if (attempt < MAX_POLL_ATTEMPTS) {
@@ -148,11 +209,13 @@ export async function pollAndDownloadReport(
     }
 
     throw new Error(
-        `[statusPage] No matching, ready report for "${expected.firstName} ${expected.lastName}" after ${MAX_POLL_ATTEMPTS} attempts — either Highmark is delayed, or the submission never went through. Not downloading anything.`
+        `[statusPage] No matching, ready report for "${expected.firstName} ${expected.lastName}" after ${MAX_POLL_ATTEMPTS} attempts — either Highmark is delayed, or the submission never went through. Not downloading anything. If you requeue, the worker will pick up the report from the status page if it appears, rather than submitting again.`
     );
 }
 
 async function navigateToStatusPage(page: Page): Promise<void> {
+    await dismissStayLoggedInPopup(page);
+
     const consumerBureau = page.locator(".consumerbureau");
     await consumerBureau.waitFor({ state: "visible", timeout: 10_000 });
 
@@ -163,9 +226,17 @@ async function navigateToStatusPage(page: Page): Promise<void> {
     const trackRequest = consumerBureau.locator("a", { hasText: "Track Request" });
     await trackRequest.hover();
 
-    // Step 3: find and click "Single Request Status" submenu
+    // Step 3: click "Single Request Status" and wait for THAT page to load —
+    // reading the table before this resolves reads the previous page.
     const link = consumerBureau.locator("a", { hasText: "Single Request Status" });
-    await link.click();
+    await clickAndWaitForNavigation(page, link);
+    await dismissStayLoggedInPopup(page);
+
+    // The results table is server-rendered, but give it a moment; an
+    // account with no requests may legitimately have no table at all.
+    await page.locator("#cust").waitFor({ state: "attached", timeout: 10_000 }).catch(() => {
+        console.warn("[statusPage] #cust table not found on status page");
+    });
 }
 
 async function downloadPdf(page: Page, pdfLink: ReturnType<Page["locator"]>): Promise<Buffer> {
