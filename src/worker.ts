@@ -2,7 +2,7 @@
 import { ClaimedJob, markComplete, markFailed } from "./queue/lock";
 import { ensureLoggedIn } from "./automation/login";
 import { fillAndSubmitInquiryForm, HighmarkFormData } from "./automation/inquiryForm";
-import { getCurrentTopReportId, pollAndDownloadReport } from "./automation/statusPage";
+import { checkStatusPage, pollAndDownloadReport } from "./automation/statusPage";
 import { uploadHighmarkPdf } from "./storage";
 import { HighmarkExtractedData, parseHighmarkPdf } from "./parsing/highmarkParser";
 import { writeHighmarkResult } from "./firestoreWriteback"; 
@@ -89,15 +89,21 @@ export async function runJob(job: ClaimedJob): Promise<void> {
 
         const page = await ensureLoggedIn();
 
-        const baselineReportId = await getCurrentTopReportId(page);
+        const expected = { firstName: formData.firstName, lastName: formData.lastName, dob: formData.dob };
 
-        await fillAndSubmitInquiryForm(page, formData);
+        // Every inquiry costs money. If a previous attempt for this person
+        // already landed on the portal (e.g. it submitted fine but the
+        // download step failed and the job was requeued), download that
+        // report instead of submitting again.
+        const { existingReportId, knownReportIds } = await checkStatusPage(page, expected);
 
-        const pdfBuffer = await pollAndDownloadReport(
-            page,
-            { firstName: formData.firstName, lastName: formData.lastName, dob: formData.dob },
-            baselineReportId
-        );
+        let pdfBuffer: Buffer;
+        if (existingReportId) {
+            pdfBuffer = await pollAndDownloadReport(page, expected, { reportId: existingReportId });
+        } else {
+            await fillAndSubmitInquiryForm(page, formData);
+            pdfBuffer = await pollAndDownloadReport(page, expected, { knownReportIds });
+        }
 
         const storagePath = await uploadHighmarkPdf(creditScoreDocId, pdfBuffer);
         const parsed = await parseHighmarkPdf(pdfBuffer);
