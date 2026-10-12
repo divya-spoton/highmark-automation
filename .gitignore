@@ -83,3 +83,5 @@ Thumbs.db
 *.sln
 *.swp
 spoton-housing.json
+# post-submit screenshots from inquiryForm.ts (contain applicant PII)
+debug-screenshots/
