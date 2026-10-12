@@ -49,7 +49,12 @@ export async function checkStatusPage(page: Page, expected: ExpectedApplicant): 
     const existing = findApplicantRow(rows, expected, (r) => isRecent(r) && !FAILED_STATUS_PATTERN.test(r.status));
     if (existing) {
         console.log(
-            `[statusPage] Existing report for "${existing.memberName}" (${existing.reportId}, status "${existing.status}") found — reusing it, NOT submitting a new inquiry`
+            `[statusPage] Pre-check: existing report for "${existing.memberName}" (${existing.reportId}, status "${existing.status}") found — reusing it, NOT submitting a new inquiry`
+        );
+    } else {
+        const top = rows[0] ? `top: ${rows[0].reportId} "${rows[0].memberName}"` : "table empty";
+        console.log(
+            `[statusPage] Pre-check: no existing report for "${expected.firstName} ${expected.lastName}" among ${rows.length} row(s) (${top}) — a new inquiry is needed`
         );
     }
 

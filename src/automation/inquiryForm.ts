@@ -1,4 +1,6 @@
-import { Page } from "playwright";
+import { Dialog, Page } from "playwright";
+import { promises as fs } from "fs";
+import path from "path";
 import { config } from "../config";
 import { clickAndWaitForNavigation } from "./navigation";
 
@@ -81,37 +83,140 @@ export async function fillAndSubmitInquiryForm(page: Page, data: HighmarkFormDat
 
     await navigateToSingleRequest(page);
 
-    await page.selectOption("#creditType", config.highmark.creditType);
-    await page.fill("#creditAmount", String(config.highmark.creditAmount));
-
-    await page.fill("#firstName", firstName);
-    await page.fill("#lastName", lastName);
-
     const [day, month, year] = dob.split("/");
     if (!day || !month || !year) {
         throw new Error(`[inquiryForm] Malformed dob "${dob}" — expected DD/MM/YYYY`);
     }
-    await page.selectOption("#dobDay", String(Number(day)));
-    await page.selectOption("#dobMonth", month);
-    await page.selectOption("#dobYear", year);
 
-    await page.fill("#fatherName", fatherName);
-    await page.fill(`#${identifierField}`, identifierValue);
-    await page.fill("#villageLocality1", addressLocality);
-    await page.fill("#addr1Line1", addressLine1);
-    await page.fill("#addr1Pin", addressPinCode);
+    const fields: FormField[] = [
+        { selector: "#creditType", value: config.highmark.creditType, kind: "select" },
+        { selector: "#creditAmount", value: String(config.highmark.creditAmount), kind: "text" },
+        { selector: "#firstName", value: firstName, kind: "text" },
+        { selector: "#lastName", value: lastName, kind: "text" },
+        { selector: "#dobDay", value: String(Number(day)), kind: "select" },
+        { selector: "#dobMonth", value: month, kind: "select" },
+        { selector: "#dobYear", value: year, kind: "select" },
+        { selector: "#fatherName", value: fatherName, kind: "text" },
+        { selector: `#${identifierField}`, value: identifierValue, kind: "text" },
+        { selector: "#villageLocality1", value: addressLocality, kind: "text" },
+        { selector: "#addr1Line1", value: addressLine1, kind: "text" },
+        { selector: "#addr1Pin", value: addressPinCode, kind: "text" },
+    ];
+
+    await fillFields(page, fields);
+
+    // Read the form back right before submitting. Highmark's own page
+    // script has cleared Loan Type / Loan Amount after we filled them
+    // ("Loan Type is required." on submit) — refill once, then refuse
+    // rather than send an incomplete form.
+    let wrong = await findWrongFields(page, fields);
+    if (wrong.length > 0) {
+        console.warn(`[inquiryForm] Fields lost their values after filling (${wrong.map((f) => f.selector).join(", ")}) — refilling`);
+        await fillFields(page, wrong);
+        wrong = await findWrongFields(page, wrong);
+        if (wrong.length > 0) {
+            throw new Error(`[inquiryForm] Fields still empty/wrong after refill: ${wrong.map((f) => f.selector).join(", ")} — NOT submitting`);
+        }
+    }
 
     if (config.dryRun) {
         console.log("[inquiryForm] DRY_RUN active — form filled but NOT submitted");
         return;
     }
 
-    // Wait for the submit's own navigation to finish before anything else
-    // touches the page — navigating away mid-submit is how we ended up
-    // unsure whether an inquiry went through. Never retry the click here:
-    // a second click is a second paid inquiry.
-    // If it doesn't navigate at all, the status page is the judge.
-    await clickAndWaitForNavigation(page, page.locator("#btnSubNewInquiry1"), { timeoutMs: 60_000, optional: true });
+    // Playwright silently dismisses alert()/confirm() when nothing listens —
+    // a validation alert (or a "submit?" confirm, which dismissing CANCELS)
+    // would vanish without a trace. Log them; keep the dismiss behaviour.
+    const onDialog = (dialog: Dialog) => {
+        console.warn(`[inquiryForm] Portal ${dialog.type()} during submit: "${dialog.message()}" — dismissing`);
+        dialog.dismiss().catch(() => {});
+    };
+    page.on("dialog", onDialog);
+
+    console.log(`[inquiryForm] Submitting inquiry for "${firstName} ${lastName}" (from ${page.url()})`);
+    try {
+        // Wait for the submit's own navigation to finish before anything else
+        // touches the page — navigating away mid-submit is how we ended up
+        // unsure whether an inquiry went through. Never retry the click here:
+        // a second click is a second paid inquiry.
+        // If it doesn't navigate at all, the status page is the judge.
+        await clickAndWaitForNavigation(page, page.locator("#btnSubNewInquiry1"), { timeoutMs: 60_000, optional: true });
+    } finally {
+        page.off("dialog", onDialog);
+    }
+
+    await logSubmitOutcome(page);
+    await assertNotRejected(page);
+}
+
+interface FormField {
+    selector: string;
+    value: string;
+    kind: "text" | "select";
+}
+
+async function fillFields(page: Page, fields: FormField[]): Promise<void> {
+    for (const f of fields) {
+        if (f.kind === "select") await page.selectOption(f.selector, f.value);
+        else await page.fill(f.selector, f.value);
+    }
+}
+
+async function findWrongFields(page: Page, fields: FormField[]): Promise<FormField[]> {
+    const wrong: FormField[] = [];
+    for (const f of fields) {
+        const actual = (await page.locator(f.selector).inputValue()).trim();
+        // Selects must match exactly; text inputs only need to be non-empty,
+        // since the portal may reformat them (e.g. "500000" → "500000.00").
+        const ok = f.kind === "select" ? actual === f.value.trim() : actual !== "";
+        if (!ok) wrong.push(f);
+    }
+    return wrong;
+}
+
+/**
+ * Highmark re-renders the form with "<Field> is required." lines when it
+ * rejects a submission. No report will ever appear for that, so fail now
+ * instead of polling the status page for 10 minutes.
+ */
+async function assertNotRejected(page: Page): Promise<void> {
+    const bodyText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+    const rejections = bodyText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => /\bis required\.?$/i.test(l));
+    if (rejections.length > 0) {
+        throw new Error(`[inquiryForm] Highmark rejected the inquiry form: ${rejections.join(" ")}`);
+    }
+}
+
+/**
+ * The portal gives us no reliable success signal yet, so record what the
+ * page looked like right after submit: URL, any error-looking text, and a
+ * screenshot. When the status page never shows the new row, this is what
+ * tells us whether Highmark rejected the form.
+ */
+async function logSubmitOutcome(page: Page): Promise<void> {
+    try {
+        console.log(`[inquiryForm] After submit: url=${page.url()} title="${await page.title()}"`);
+
+        const bodyText = await page.locator("body").innerText({ timeout: 5_000 });
+        const suspicious = bodyText
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l && /error|invalid|mandatory|required|duplicate|not allowed|failed|exceed|insufficient/i.test(l))
+            .slice(0, 10);
+        if (suspicious.length > 0) {
+            console.warn(`[inquiryForm] Possible error text on page after submit:\n  ${suspicious.join("\n  ")}`);
+        }
+
+        const shotPath = path.join("debug-screenshots", `after-submit-${Date.now()}.png`);
+        await fs.mkdir("debug-screenshots", { recursive: true });
+        await page.screenshot({ path: shotPath, fullPage: true });
+        console.log(`[inquiryForm] Screenshot saved: ${shotPath}`);
+    } catch (err) {
+        console.warn("[inquiryForm] Could not capture post-submit diagnostics:", err instanceof Error ? err.message : err);
+    }
 }
 
 /**
@@ -133,4 +238,10 @@ async function navigateToSingleRequest(page: Page): Promise<void> {
     // Step 3: CIR PRO V2 should now be visible → click it
     const cirProV2 = consumerBureau.locator("a", { hasText: "CIR PRO V2" });
     await clickAndWaitForNavigation(page, cirProV2);
+
+    // Wait for the full "load" event, not just DOMContentLoaded: the form's
+    // own init scripts run around then and can reset fields we've already
+    // filled (how Loan Type / Loan Amount ended up blank on submit).
+    await page.waitForLoadState("load");
+    await page.locator("#creditType").waitFor({ state: "visible", timeout: 10_000 });
 }
